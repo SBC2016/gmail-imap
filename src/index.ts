@@ -2,6 +2,8 @@ import { Type } from "@sinclair/typebox";
 import { ImapFlow, type FetchMessageObject, type FetchQueryObject } from "imapflow";
 import { simpleParser, type ParsedMail, type Attachment as ParsedAttachment } from "mailparser";
 import nodemailer from "nodemailer";
+// @ts-ignore - nodemailer ships MailComposer without a public type export
+import MailComposer from "nodemailer/lib/mail-composer/index.js";
 import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -40,6 +42,8 @@ interface RawConfig {
   defaultSearchLimit?: number;
   attachmentsDir?: string;
   requireExplicitSendConfirmation?: boolean;
+  /** Mailbox to store drafts in. Auto-detected via the \\Drafts special-use flag when omitted. */
+  draftsMailbox?: string;
 }
 
 interface NormalizedConfig {
@@ -54,6 +58,7 @@ interface NormalizedConfig {
   defaultSearchLimit: number;
   attachmentsDir: string;
   requireExplicitSendConfirmation: boolean;
+  draftsMailbox?: string;
 }
 
 function normalizeConfig(input: RawConfig): NormalizedConfig {
@@ -83,6 +88,7 @@ function normalizeConfig(input: RawConfig): NormalizedConfig {
     defaultSearchLimit: input.defaultSearchLimit ?? DEFAULT_SEARCH_LIMIT,
     attachmentsDir: input.attachmentsDir ?? join(homedir(), ".openclaw", "inbox", "gmail"),
     requireExplicitSendConfirmation: input.requireExplicitSendConfirmation ?? true,
+    draftsMailbox: input.draftsMailbox?.trim() || undefined,
   };
 }
 
@@ -850,6 +856,107 @@ function createRuntime(cfg: NormalizedConfig) {
         transport.close();
       }
     },
+
+    /**
+     * Serialise a message to RFC 822 and APPEND it to the Drafts mailbox with the \\Draft flag.
+     * Nothing is sent; the draft can be reviewed and sent from any mail client.
+     */
+    async saveDraft(params: OutgoingMessage) {
+      const composer = new MailComposer({
+        from: cfg.fromName ? `${cfg.fromName} <${cfg.from}>` : cfg.from,
+        replyTo: cfg.replyTo,
+        to: normalizeRecipients(params.to),
+        cc: normalizeRecipients(params.cc),
+        bcc: normalizeRecipients(params.bcc),
+        subject: params.subject,
+        text: params.text,
+        html: params.html,
+        inReplyTo: params.inReplyTo,
+        references: params.references,
+        attachments: (params.attachments ?? []).map((a) => ({
+          path: a.path,
+          filename: a.filename,
+          contentType: a.contentType,
+        })),
+      });
+      const raw: Buffer = await composer.compile().build();
+      return withImapClient(cfg, async (client) => {
+        const mailbox = await resolveDraftsMailbox(client, cfg);
+        const appended = await client.append(mailbox, raw, ["\\Draft", "\\Seen"], new Date());
+        const uid = appended && typeof appended === "object" && "uid" in appended ? Number((appended as { uid?: number }).uid) : undefined;
+        return {
+          mailbox,
+          uid: Number.isFinite(uid) ? uid : undefined,
+          subject: params.subject,
+          to: normalizeRecipients(params.to),
+          cc: normalizeRecipients(params.cc),
+          bcc: normalizeRecipients(params.bcc),
+          bytes: raw.length,
+        };
+      });
+    },
+  };
+}
+
+interface OutgoingMessage {
+  to: string | string[];
+  cc?: string | string[];
+  bcc?: string | string[];
+  subject: string;
+  text?: string;
+  html?: string;
+  attachments?: { path: string; filename?: string; contentType?: string }[];
+  inReplyTo?: string;
+  references?: string[];
+}
+
+/** Pick the Drafts mailbox: explicit config wins, otherwise the \\Drafts special-use folder. */
+async function resolveDraftsMailbox(client: ImapFlow, cfg: NormalizedConfig): Promise<string> {
+  if (cfg.draftsMailbox) return cfg.draftsMailbox;
+  const mailboxes = await client.list();
+  const drafts = mailboxes.find((mb) => mb.specialUse === "\\Drafts");
+  if (drafts) return drafts.path;
+  const byName = mailboxes.find((mb) => /^(\[gmail\]\/)?drafts$/i.test(mb.path));
+  if (byName) return byName.path;
+  throw new Error("Could not find a Drafts mailbox; set 'draftsMailbox' in the plugin config.");
+}
+
+/** Compose a reply (recipients, subject, threading headers, quoted body) without sending it. */
+function buildReply(
+  original: FullMessage,
+  params: { text?: string; html?: string; replyAll?: boolean; attachments?: OutgoingMessage["attachments"] },
+  cfg: NormalizedConfig
+): OutgoingMessage {
+  const ownAddresses = uniqueStrings([lower(cfg.from), lower(cfg.username)]);
+  const replyTarget = original.replyTo || original.from;
+  const subject = /^re:/i.test(original.subject) ? original.subject : `Re: ${original.subject}`;
+  const messageIdRef = original.messageId
+    ? `<${String(original.messageId).replace(/^<|>$/g, "")}>`
+    : undefined;
+  const references = uniqueStrings([...(original.references ?? []), messageIdRef ?? ""].filter(Boolean));
+  let to: string[];
+  let cc: string[] = [];
+  if (params.replyAll) {
+    const all = uniqueStrings(
+      [replyTarget, original.to, original.cc].join(",").split(",").map((s) => s.trim()).filter(Boolean)
+    ).filter((addr) => !ownAddresses.includes(lower(addr)));
+    to = all.slice(0, 1);
+    cc = all.slice(1);
+  } else {
+    to = [replyTarget].filter(Boolean);
+  }
+  const quoted = original.bodyText
+    ? `\n\nOn ${original.date ?? ""}, ${original.from} wrote:\n${original.bodyText.split("\n").map((l) => `> ${l}`).join("\n")}`
+    : "";
+  return {
+    to,
+    cc,
+    subject,
+    text: params.text ? `${params.text}${quoted}` : undefined,
+    html: params.html,
+    inReplyTo: messageIdRef,
+    references,
+    attachments: params.attachments,
   };
 }
 
@@ -1153,40 +1260,34 @@ export default definePluginEntry({
         }
         if (!params.text && !params.html) throw new Error("Provide text and/or html body");
         const original = await runtime.getMessage(params);
-        const ownAddresses = uniqueStrings([lower(cfg.from), lower(cfg.username)]);
-        const replyTarget = original.replyTo || original.from;
-        const subject = /^re:/i.test(original.subject) ? original.subject : `Re: ${original.subject}`;
-        const messageIdRef = original.messageId
-          ? `<${String(original.messageId).replace(/^<|>$/g, "")}>`
-          : undefined;
-        const references = uniqueStrings([...(original.references ?? []), messageIdRef ?? ""].filter(Boolean));
-        let to: string[];
-        let cc: string[] = [];
-        if (params.replyAll) {
-          const all = uniqueStrings(
-            [replyTarget, original.to, original.cc].join(",").split(",").map((s) => s.trim()).filter(Boolean)
-          ).filter((addr) => !ownAddresses.includes(lower(addr)));
-          to = all.slice(0, 1);
-          cc = all.slice(1);
-        } else {
-          to = [replyTarget].filter(Boolean);
-        }
-        const quoted = original.bodyText
-          ? `\n\nOn ${original.date ?? ""}, ${original.from} wrote:\n${original.bodyText.split("\n").map((l) => `> ${l}`).join("\n")}`
-          : "";
-        const result = await runtime.sendMessage({
-          to,
-          cc,
-          subject,
-          text: params.text ? `${params.text}${quoted}` : undefined,
-          html: params.html,
-          inReplyTo: messageIdRef,
-          references,
-          attachments: params.attachments,
-        });
+        const result = await runtime.sendMessage(buildReply(original, params, cfg));
         return toolTextResult(
           `Replied. accepted=[${result.accepted.join(", ")}] subject="${result.subject}"`,
           { status: "sent", ...result }
+        );
+      },
+    });
+
+    api.registerTool({
+      name: "gmail_message_reply_draft",
+      label: "Draft a reply",
+      description:
+        "Compose a reply to an existing message by UID and save it to the Drafts mailbox WITHOUT sending. Threading headers (In-Reply-To/References), subject, recipients and quoted original are prepared exactly as gmail_message_reply would. Does not require confirm. Returns the draft's mailbox and UID.",
+      parameters: Type.Object({
+        mailbox: Type.Optional(Type.String({ minLength: 1 })),
+        uid: Type.Integer({ minimum: 1 }),
+        text: Type.Optional(Type.String()),
+        html: Type.Optional(Type.String()),
+        replyAll: Type.Optional(Type.Boolean()),
+        attachments: Type.Optional(Type.Array(attachmentInputSchema)),
+      }),
+      async execute(_id: unknown, params: any) {
+        if (!params.text && !params.html) throw new Error("Provide text and/or html body");
+        const original = await runtime.getMessage(params);
+        const result = await runtime.saveDraft(buildReply(original, params, cfg));
+        return toolTextResult(
+          `Draft saved to "${result.mailbox}"${result.uid ? ` (uid ${result.uid})` : ""}. subject="${result.subject}" to=[${result.to.join(", ")}]. Not sent.`,
+          { status: "drafted", inReplyToUid: params.uid, ...result }
         );
       },
     });

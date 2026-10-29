@@ -797,6 +797,17 @@ function createRuntime(cfg: NormalizedConfig) {
       );
     },
 
+    /** Mark a message \\Answered (what mail clients do once a reply exists for it). */
+    async markAnswered(params: { mailbox?: string; uid: number }) {
+      const mailbox = params.mailbox?.trim() || cfg.defaultMailbox;
+      return withImapClient(cfg, (client) =>
+        withMailboxLock(client, mailbox, async () => {
+          await client.messageFlagsAdd(String(params.uid), ["\\Answered"], { uid: true });
+          return { mailbox, uid: params.uid };
+        })
+      );
+    },
+
     async moveMessage(params: { mailbox?: string; uid: number; destinationMailbox: string }) {
       const sourceMailbox = params.mailbox?.trim() || cfg.defaultMailbox;
       return withImapClient(cfg, (client) =>
@@ -1272,7 +1283,7 @@ export default definePluginEntry({
       name: "gmail_message_reply_draft",
       label: "Draft a reply",
       description:
-        "Compose a reply to an existing message by UID and save it to the Drafts mailbox WITHOUT sending. Threading headers (In-Reply-To/References), subject, recipients and quoted original are prepared exactly as gmail_message_reply would. Does not require confirm. Returns the draft's mailbox and UID.",
+        "Compose a reply to an existing message by UID and save it to the Drafts mailbox WITHOUT sending. Threading headers (In-Reply-To/References), subject, recipients and quoted original are prepared exactly as gmail_message_reply would. Does not require confirm. By default also sets \\Answered on the original (markAnswered=false to skip). Returns the draft's mailbox and UID.",
       parameters: Type.Object({
         mailbox: Type.Optional(Type.String({ minLength: 1 })),
         uid: Type.Integer({ minimum: 1 }),
@@ -1280,14 +1291,17 @@ export default definePluginEntry({
         html: Type.Optional(Type.String()),
         replyAll: Type.Optional(Type.Boolean()),
         attachments: Type.Optional(Type.Array(attachmentInputSchema)),
+        markAnswered: Type.Optional(Type.Boolean()),
       }),
       async execute(_id: unknown, params: any) {
         if (!params.text && !params.html) throw new Error("Provide text and/or html body");
         const original = await runtime.getMessage(params);
         const result = await runtime.saveDraft(buildReply(original, params, cfg));
+        const markAnswered = params.markAnswered !== false;
+        if (markAnswered) await runtime.markAnswered({ mailbox: params.mailbox, uid: params.uid });
         return toolTextResult(
-          `Draft saved to "${result.mailbox}"${result.uid ? ` (uid ${result.uid})` : ""}. subject="${result.subject}" to=[${result.to.join(", ")}]. Not sent.`,
-          { status: "drafted", inReplyToUid: params.uid, ...result }
+          `Draft saved to "${result.mailbox}"${result.uid ? ` (uid ${result.uid})` : ""}. subject="${result.subject}" to=[${result.to.join(", ")}].${markAnswered ? " Original marked \\Answered." : ""} Not sent.`,
+          { status: "drafted", inReplyToUid: params.uid, originalMarkedAnswered: markAnswered, ...result }
         );
       },
     });

@@ -21,6 +21,8 @@ const BODY_TEXT_LIMIT = 4000;
 const FETCH_CANDIDATES_CAP = 1000;
 const SEARCH_FETCH_TIMEOUT_MS = 30_000;
 const IMAP_CONNECT_TIMEOUT_MS = 10_000;
+// imapflow defaults to 300_000; keep idle sockets short-lived so a stray connection cannot linger.
+const IMAP_SOCKET_TIMEOUT_MS = 60_000;
 const IMAP_RETRY_ATTEMPTS = 3;
 const IMAP_RETRY_DELAYS_MS = [100, 500, 2000] as const;
 
@@ -196,16 +198,23 @@ async function withImapClient<T>(cfg: NormalizedConfig, fn: (client: ImapFlow) =
       secure: cfg.imap.secure,
       auth: { user: cfg.username, pass: cfg.appPassword },
       logger: false,
+      socketTimeout: IMAP_SOCKET_TIMEOUT_MS,
     });
+    // ImapFlow is an EventEmitter and emits 'error' asynchronously (e.g. ETIMEOUT "Socket timeout"
+    // once socketTimeout elapses on a connection we abandoned after a failed login). Without a
+    // listener Node raises it as an uncaught exception and takes the whole host process down.
+    // Failures are already surfaced to callers via the thrown error, so the event is a no-op here.
+    client.on("error", () => { /* surfaced via thrown errors */ });
+    let connectTimer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
         client.connect(),
-        new Promise<never>((_, reject) =>
-          setTimeout(
+        new Promise<never>((_, reject) => {
+          connectTimer = setTimeout(
             () => reject(new Error(`IMAP connect timed out after ${IMAP_CONNECT_TIMEOUT_MS}ms`)),
             IMAP_CONNECT_TIMEOUT_MS
-          )
-        ),
+          );
+        }),
       ]);
       try {
         return await fn(client);
@@ -214,10 +223,14 @@ async function withImapClient<T>(cfg: NormalizedConfig, fn: (client: ImapFlow) =
       }
     } catch (err) {
       lastErr = err;
+      // Always release the socket, whether or not we retry; a non-retryable failure
+      // (e.g. authentication) used to leave the connection open until socketTimeout fired.
+      try { client.close(); } catch { /* ignore */ }
       const msg = err instanceof Error ? err.message : String(err);
       const isRetryable = /connection not available|connect timed out|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|ETIMEDOUT|socket|network/i.test(msg);
       if (!isRetryable || attempt === IMAP_RETRY_ATTEMPTS - 1) throw err;
-      try { client.close(); } catch { /* ignore */ }
+    } finally {
+      if (connectTimer) clearTimeout(connectTimer);
     }
   }
   throw lastErr;

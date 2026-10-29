@@ -120,7 +120,8 @@ Edit `~/.openclaw/openclaw.json`:
       "gmail_message_update",
       "gmail_message_move",
       "gmail_message_send",
-      "gmail_message_reply"
+      "gmail_message_reply",
+"gmail_message_reply_draft"
     ]
   }
 }
@@ -155,6 +156,7 @@ Now ask your agent:
 | `gmail_message_move` | Move a message between mailboxes (e.g. INBOX → Archive). |
 | `gmail_message_send` | Send a new email. Requires `confirm: true` by default. |
 | `gmail_message_reply` | Reply to a message by UID, with optional `replyAll`. Sets `In-Reply-To` and `References` for proper threading. Quotes the original body. Requires `confirm: true` by default. |
+| `gmail_message_reply_draft` | Same composition as `gmail_message_reply` (threading headers, recipients, quoted body) but saves the result to the Drafts mailbox instead of sending. Never sends, so no `confirm` needed. Returns the draft's mailbox and UID. |
 
 ### Search examples
 
@@ -203,6 +205,7 @@ All tools use the configured account; the agent doesn't pick credentials.
 | `defaultMailbox` | string | `INBOX` | Mailbox used when a tool call omits one. |
 | `defaultSearchLimit` | int | `10` | Default `limit` for `gmail_messages_search`. |
 | `attachmentsDir` | string | `~/.openclaw/inbox/gmail` | Base directory for saved attachments. |
+| `draftsMailbox` | string | auto | Mailbox used by `gmail_message_reply_draft`. Auto-detected via the `\Drafts` special-use flag (`[Gmail]/Drafts`, iCloud `Drafts`). |
 | `requireExplicitSendConfirmation` | bool | `true` | When true, `gmail_message_send` and `gmail_message_reply` refuse to run without `confirm: true`. |
 
 ---

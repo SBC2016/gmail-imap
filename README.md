@@ -120,7 +120,8 @@ Edit `~/.openclaw/openclaw.json`:
       "gmail_message_update",
       "gmail_message_move",
       "gmail_message_send",
-      "gmail_message_reply"
+      "gmail_message_reply",
+"gmail_message_reply_draft"
     ]
   }
 }
@@ -155,6 +156,7 @@ Now ask your agent:
 | `gmail_message_move` | Move a message between mailboxes (e.g. INBOX → Archive). |
 | `gmail_message_send` | Send a new email. Requires `confirm: true` by default. |
 | `gmail_message_reply` | Reply to a message by UID, with optional `replyAll`. Sets `In-Reply-To` and `References` for proper threading. Quotes the original body. Requires `confirm: true` by default. |
+| `gmail_message_reply_draft` | Same composition as `gmail_message_reply` (threading headers, recipients, quoted body) but saves the result to the drafts mailbox with the `\Draft` flag instead of sending. Never sends, so no `confirm` needed. By default it also marks the original `\Seen` (`markRead: false` to leave it alone). Returns `{ status: "drafted", mailbox, uid, subject, to, cc, originalMarkedRead }`. |
 
 ### Search examples
 
@@ -203,6 +205,7 @@ All tools use the configured account; the agent doesn't pick credentials.
 | `defaultMailbox` | string | `INBOX` | Mailbox used when a tool call omits one. |
 | `defaultSearchLimit` | int | `10` | Default `limit` for `gmail_messages_search`. |
 | `attachmentsDir` | string | `~/.openclaw/inbox/gmail` | Base directory for saved attachments. |
+| `draftsMailbox` | string | auto | Mailbox used by `gmail_message_reply_draft`. Auto-detected via the `\Drafts` special-use flag (`[Gmail]/Drafts`, iCloud `Drafts`) when omitted. Set it explicitly if your mail client does not show the server's stock Drafts folder (see Troubleshooting). |
 | `requireExplicitSendConfirmation` | bool | `true` | When true, `gmail_message_send` and `gmail_message_reply` refuse to run without `confirm: true`. |
 
 ---
@@ -331,6 +334,10 @@ That's an unrelated log line from the OpenClaw core's channel-watcher subsystem,
 
 ---
 
+### Drafts saved by `gmail_message_reply_draft` don't show up as drafts in my mail client
+
+The draft is written over IMAP with the `\Draft` flag, which is what Apple Mail, Thunderbird and iCloud/Gmail web read. Some clients keep their own drafts store and ignore the server's stock Drafts folder (seen with Outlook on an iCloud account synced through Microsoft). Create a folder in that client (for example `Openclaw Drafts`), then set `draftsMailbox` to its exact name. In that setup Outlook lists the drafts and tags the original message with `[Draft]`.
+
 ## Security model
 
 - Credentials live in `~/.openclaw/openclaw.json`, readable only by your user account. Don't check this file in.
@@ -366,6 +373,11 @@ PRs welcome — see [Contributing](#contributing).
 ---
 
 ## Changelog
+
+### Unreleased
+
+- **New tool `gmail_message_reply_draft`**: composes a reply exactly like `gmail_message_reply` (recipients, `Re:` subject, `In-Reply-To`/`References`, quoted original, optional `replyAll` and attachments) and saves it to the drafts mailbox via IMAP APPEND with the `\Draft` flag. Never sends and needs no `confirm`. By default it also marks the original message `\Seen` (`markRead: false` to skip).
+- **New config `draftsMailbox`**: override the drafts folder. Auto-detected through the `\Drafts` special-use flag when omitted.
 
 ### 0.3.0
 

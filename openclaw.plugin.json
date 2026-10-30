@@ -11,6 +11,7 @@
       "gmail_thread_get",
       "gmail_message_send",
       "gmail_message_reply",
+      "gmail_message_reply_draft",
       "gmail_message_update",
       "gmail_message_move",
       "gmail_message_attachments_save"
@@ -91,6 +92,10 @@
         "type": "boolean",
         "default": true,
         "description": "When true, send and reply tools require confirm=true."
+      },
+      "draftsMailbox": {
+        "type": "string",
+        "description": "Mailbox used by gmail_message_reply_draft. Auto-detected via the \\Drafts special-use flag when omitted (e.g. [Gmail]/Drafts, Drafts)."
       }
     }
   },
@@ -109,6 +114,10 @@
     "fromName": {
       "label": "Display name",
       "help": "Name shown to recipients (e.g. Manuel Fedele)"
+    },
+    "draftsMailbox": {
+      "label": "Drafts mailbox",
+      "help": "Leave empty to auto-detect. Set explicitly if your server does not advertise a \\Drafts folder, or if your mail client (e.g. Outlook) only shows drafts from a custom folder."
     },
     "requireExplicitSendConfirmation": {
       "label": "Require send confirmation",
